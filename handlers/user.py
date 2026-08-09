@@ -53,8 +53,8 @@ DEFAULT_INSTRUCTIONS = (
 
 DEFAULT_WELCOME_TEXT = (
     sh("🚀 <b>Welcome to PREMIUM SHOP!</b> 🎟️\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n") +
+    sb("Hello <b>") + "{full_name}" + sb("</b>! Ready to unlock some amazing deals?\n\n") +
     sb(
-        "Hello <b>{full_name}</b>! Ready to unlock some amazing deals?\n\n"
         "We are your trusted source for <b>verified SHEIN discount vouchers</b>. "
         "Get premium codes with <b>instant delivery</b> and 24/7 protection.\n\n"
         "✨ <b>WHY CHOOSE US?</b>\n"
@@ -175,6 +175,8 @@ async def cmd_start(message: Message, command: CommandObject, state: FSMContext,
 
     current = await get_setting(session, "welcome_message", DEFAULT_WELCOME_TEXT)
     welcome_text = current.replace("{full_name}", message.from_user.full_name)
+    welcome_text = welcome_text.replace("{𝖿𝗎𝗅𝗅_𝗇𝖺𝗆𝖾}", message.from_user.full_name)
+    welcome_text = welcome_text.replace("{𝗳𝘂𝗹𝗹_𝗻𝗮𝗺𝗲}", message.from_user.full_name)
     await message.answer(welcome_text, reply_markup=main_reply_keyboard(message.from_user.id, is_admin))
 
 
