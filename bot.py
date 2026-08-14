@@ -136,6 +136,8 @@ async def main():
             app = FastAPI()
 
             @app.get("/")
+            @app.head("/")
+            @app.post("/")
             async def root():
                 return {"status": "online", "bot": "@shien_chip_bot"}
 
