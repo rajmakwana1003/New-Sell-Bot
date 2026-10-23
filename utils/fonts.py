@@ -68,7 +68,17 @@ def stylize_html(text: str, styler_func) -> str:
 
 # ─── Premium Visual Helpers ───────────────────────────────────────────────────
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def get_ist_now() -> datetime:
+    """Returns current datetime in Indian Standard Time (IST / UTC+05:30)."""
+    return datetime.now(timezone.utc).astimezone(IST)
+
+def format_sync_time() -> str:
+    """Formats current IST time as '10:45:30 AM IST'."""
+    return get_ist_now().strftime('%I:%M:%S %p IST')
 
 def header(emoji: str, title: str) -> str:
     """Sleek header for mobile screens."""
@@ -154,8 +164,8 @@ def tier_icon(order_count: int) -> str:
     return "🆕"
 
 def time_greeting() -> str:
-    """Dynamic greeting based on time of day."""
-    hour = datetime.now().hour
+    """Dynamic greeting based on Indian Standard Time (IST)."""
+    hour = get_ist_now().hour
     if 5 <= hour < 12:   return "🌅 Good Morning"
     if 12 <= hour < 17:  return "☀️ Good Afternoon"
     if 17 <= hour < 21:  return "🌆 Good Evening"
