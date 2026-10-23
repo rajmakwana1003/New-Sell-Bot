@@ -1,5 +1,4 @@
 import os
-import certifi
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from pymongo import ReturnDocument, ASCENDING, DESCENDING
 from pymongo.server_api import ServerApi
@@ -46,6 +45,22 @@ async def get_next_id(collection: str) -> int:
         return_document=ReturnDocument.AFTER,
     )
     return result["seq"]
+
+
+async def get_next_ids(collection: str, count: int) -> int:
+    """
+    Atomic auto-increment range of integer _ids using a 'counters' collection.
+    Returns the start_id of the allocated block: [start_id, start_id + count - 1].
+    """
+    if count <= 0:
+        return 0
+    result = await _db.counters.find_one_and_update(
+        {"_id": collection},
+        {"$inc": {"seq": count}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return result["seq"] - count + 1
 
 
 async def init_db():
