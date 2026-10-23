@@ -166,8 +166,9 @@ def price_tag(amount) -> str:
     return f"<b>₹{amount}</b>"
 
 def code_block(code: str) -> str:
-    """Sleek mobile-friendly coupon code display."""
-    return f"<blockquote>🔑 <code>{code}</code></blockquote>"
+    """Sleek mobile-friendly coupon code display with HTML entity escaping."""
+    esc = _html.escape(str(code))
+    return f"<blockquote>🔑 <code>{esc}</code></blockquote>"
 
 def format_coupon_code(code: str) -> str:
     """
@@ -176,8 +177,9 @@ def format_coupon_code(code: str) -> str:
     1. Web URLs (renders as clickable HTML links)
     2. Gift Cards with Code + PIN (splits by Delimiter and renders them as separate copyable code blocks)
     3. Normal code strings (renders as standard code blocks)
+    All outputs safely escape HTML special characters.
     """
-    code_stripped = code.strip()
+    code_stripped = str(code).strip()
     
     # 1. Check if it's a URL
     is_url = False
@@ -187,8 +189,10 @@ def format_coupon_code(code: str) -> str:
         is_url = True
         
     if is_url:
-        url = code_stripped if code_stripped.startswith(("http://", "https://")) else f"https://{code_stripped}"
-        return f"<blockquote>🔗 <b>Link:</b> <a href='{url}'>{code_stripped}</a></blockquote>"
+        raw_url = code_stripped if code_stripped.startswith(("http://", "https://")) else f"https://{code_stripped}"
+        esc_url = _html.escape(raw_url)
+        esc_text = _html.escape(code_stripped)
+        return f"<blockquote>🔗 <b>Link:</b> <a href='{esc_url}'>{esc_text}</a></blockquote>"
         
     # 2. Check if it contains a PIN (split by |, /, :, or spaces)
     pin_keywords = [r'\s*\|\s*', r'\s*/\s*', r'\s*PIN:\s*', r'\s*pin:\s*', r'\s*Pin:\s*', r'\s*PIN\s+', r'\s*pin\s+']
@@ -199,14 +203,14 @@ def format_coupon_code(code: str) -> str:
             p_part = match[1].strip()
             if c_part.lower().startswith("code:"):
                 c_part = c_part[5:].strip()
-            return f"<blockquote>🔑 <b>Code:</b> <code>{c_part}</code>\n📌 <b>PIN:</b> <code>{p_part}</code></blockquote>"
+            return f"<blockquote>🔑 <b>Code:</b> <code>{_html.escape(c_part)}</code>\n📌 <b>PIN:</b> <code>{_html.escape(p_part)}</code></blockquote>"
 
     # Handle simple space-separated parts if it matches exactly two alphanumeric/number sequences of code + pin
     space_split = code_stripped.split()
     if len(space_split) == 2:
         c_part, p_part = space_split[0], space_split[1]
         if len(p_part) <= 8:
-            return f"<blockquote>🔑 <b>Code:</b> <code>{c_part}</code>\n📌 <b>PIN:</b> <code>{p_part}</code></blockquote>"
+            return f"<blockquote>🔑 <b>Code:</b> <code>{_html.escape(c_part)}</code>\n📌 <b>PIN:</b> <code>{_html.escape(p_part)}</code></blockquote>"
 
     # 3. Default: standard single code block
     return code_block(code_stripped)
@@ -250,7 +254,7 @@ class TelegramHTMLSanitizer(HTMLParser):
                 if tag == 'a' and name == 'href':
                     filtered_attrs.append(f'href="{_html.escape(value)}"')
                 elif tag == 'span' and name == 'class' and value == 'tg-spoiler':
-                    filtered_attrs.append(f'class="tg-spoiler"')
+                    filtered_attrs.append('class="tg-spoiler"')
                 elif tag == 'tg-emoji' and name == 'emoji-id':
                     filtered_attrs.append(f'emoji-id="{_html.escape(value)}"')
             
