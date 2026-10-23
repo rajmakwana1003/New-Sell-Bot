@@ -1,20 +1,18 @@
 import os
 import html
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime
 from aiogram import Router, F, Bot
 from aiogram.filters import Command, Filter
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from motor.motor_asyncio import AsyncIOMotorDatabase
 from database.db import AsyncSessionLocal
 from utils.fonts import (bold_sans, sans_normal, stylize_html,
-    header, sub_header, divider, light_divider, mini_divider,
-    footer_box, stat_line, stat_line_bold, step_indicator, 
-    progress_bar, stock_bar, tier_badge, tier_icon, time_greeting,
-    price_tag, code_block, order_id_display, countdown_text, escape_html)
+    header, sub_header, divider,
+    footer_box, stat_line, stat_line_bold)
 
 def sh(text: str) -> str:
     return stylize_html(text, bold_sans)
@@ -22,22 +20,20 @@ def sh(text: str) -> str:
 def sb(text: str) -> str:
     return stylize_html(text, sans_normal)
 from database.requests import (
-    add_category, add_coupon, get_categories, get_transaction, get_coupon, 
+    add_category, get_categories, get_transaction, get_coupon, 
     finalize_sale, reverse_sale, start_flash_sale, stop_flash_sale, update_transaction, get_all_users, get_stats, 
     get_channels, add_channel_db, delete_channel_db, get_setting, set_setting,
     delete_category_db, delete_coupon_db, get_all_coupons_by_category,
-    get_available_coupons, get_user_by_id, update_category_price,
-    find_transaction_robust, get_coupons_by_transaction, update_category_terms,
+    get_user_by_id, update_category_price,
+    find_transaction_robust, update_category_terms,
     update_category_name, update_category_description,
     delete_all_coupons_by_category,
     get_referral_rewards, add_referral_reward, delete_referral_reward,
-    get_blocked_users, get_suspicious_users, get_order_dashboard_stats,
+    get_blocked_users, get_order_dashboard_stats,
     get_referral_reward_by_id, get_category_with_stock, get_category_price,
-    get_category, get_admins, set_admin_status, get_user_full_history,
+    get_category,
     get_users_with_purchases, get_transactions_by_status, get_pending_transactions,
-    get_transaction_with_items, purge_cancelled_transactions, get_channel,
-    toggle_category_status, reset_user_warnings, toggle_support_status,
-    add_support_contact, delete_support_contact, get_all_support_contacts
+    get_transaction_with_items, purge_cancelled_transactions, get_channel
 )
 
 router = Router()
@@ -224,12 +220,16 @@ async def close_settings_cb(callback: CallbackQuery):
 
 @router.callback_query(F.data == "toggle_m_mode")
 async def toggle_m_mode_cb(callback: CallbackQuery, state: FSMContext, session: AsyncIOMotorDatabase):
+    import time
     curr = await get_setting(session, "maintenance_mode", "off")
     new = "on" if curr == "off" else "off"
     await set_setting(session, "maintenance_mode", new)
+    from middlewares.checks import GLOBAL_CACHE
+    GLOBAL_CACHE["maintenance"]["val"] = new
+    GLOBAL_CACHE["maintenance"]["expires"] = time.time() + 600
     await admin_settings(callback.message, session, state)
     await callback.message.delete()
-    await callback.answer()
+    await callback.answer(f"Maintenance mode set to {'ON' if new == 'on' else 'OFF'}.")
 
 @router.callback_query(F.data == "toggle_r_mode")
 async def toggle_r_mode_cb(callback: CallbackQuery, state: FSMContext, session: AsyncIOMotorDatabase):
@@ -538,17 +538,17 @@ async def add_coupon_price_proc(message: Message, state: FSMContext):
         except ValueError:
             return await message.answer("❌ Invalid price. Enter a positive number (e.g. <b>99</b> or <b>149.50</b>):")
 
-    # Bulk insert
+    # High-performance bulk insert
     async with AsyncSessionLocal() as session:
-        for code in valid_codes:
-            await add_coupon(session, cat_id, code, price)
+        from database.requests import add_coupons_bulk
+        inserted_count = await add_coupons_bulk(session, cat_id, valid_codes, price)
 
     await state.clear()
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📢 Notify All Users", callback_data=f"admin_notify_stock_{cat_id}_{len(valid_codes)}")],
+        [InlineKeyboardButton(text="📢 Notify All Users", callback_data=f"admin_notify_stock_{cat_id}_{inserted_count}")],
         [InlineKeyboardButton(text="✅ Done", callback_data="admin_vouchers_back")]
     ])
-    await message.answer(f"✅ Added <b>{len(valid_codes)}</b> codes to <b>{cat_name}</b> at <b>₹{price}</b> each.", reply_markup=kb)
+    await message.answer(f"✅ Added <b>{inserted_count}</b> codes to <b>{cat_name}</b> at <b>₹{price}</b> each.", reply_markup=kb)
 
 @router.callback_query(F.data.startswith("admin_edit_price_"), ~F.data.endswith("_exec"))
 async def edit_price_start(callback: CallbackQuery, state: FSMContext):
@@ -592,7 +592,7 @@ async def edit_price_proc(message: Message, state: FSMContext):
         f"Apply this change to all UNSOLD coupons?"
     )
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ CONFIRM UPDATE", callback_data=f"admin_edit_price_exec")],
+        [InlineKeyboardButton(text="✅ CONFIRM UPDATE", callback_data="admin_edit_price_exec")],
         [InlineKeyboardButton(text="❌ CANCEL", callback_data=f"admin_manage_cat_{cat_id}")]
     ])
     await message.answer(text, reply_markup=kb)
@@ -772,6 +772,13 @@ async def admin_flash_notify_cb(callback: CallbackQuery, bot: Bot, session: Asyn
             await bot.send_message(chat_id=u.id, text=broadcast_text)
             count += 1
             await asyncio.sleep(0.05)
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.send_message(chat_id=u.id, text=broadcast_text)
+                count += 1
+            except Exception:
+                pass
         except Exception:
             pass
             
@@ -902,7 +909,7 @@ async def edit_qr_start(callback: CallbackQuery, state: FSMContext, session: Asy
         sh(f"Category: <b>{cat.name}</b>\n") +
         sh("━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n") +
         sb("This QR code will be displayed to users when they checkout this category.\n\n") +
-        (f"✅ Current: <i>Custom QR set</i>\n\n" if cat.qr_file_id else "⚠️ Current: <i>Using default bot QR</i>\n\n") +
+        ("✅ Current: <i>Custom QR set</i>\n\n" if cat.qr_file_id else "⚠️ Current: <i>Using default bot QR</i>\n\n") +
         sb("👉 Please upload/send the new QR code image now.\n\n") +
         sb("<i>Type '/cancel' or use another menu button to cancel.</i>")
     )
@@ -1100,6 +1107,8 @@ async def admin_demote_cb(callback: CallbackQuery, session: AsyncIOMotorDatabase
     u_id = int(callback.data.split("_")[-1])
     from database.requests import set_admin_status
     await set_admin_status(session, u_id, False)
+    from middlewares.checks import USER_CACHE
+    USER_CACHE.pop(u_id, None)
     await callback.answer("✅ User demoted to regular user.")
     await admin_list_managers_cb(callback, session)
 
@@ -1303,8 +1312,15 @@ async def admin_notify_update_cb(callback: CallbackQuery, bot: Bot, session: Asy
         try:
             await bot.send_message(u.id, msg, reply_markup=kb)
             count += 1
-            await asyncio.sleep(0.04) 
-        except:
+            await asyncio.sleep(0.04)
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.send_message(u.id, msg, reply_markup=kb)
+                count += 1
+            except Exception:
+                pass
+        except Exception:
             pass
             
     await m.edit_text(f"✅ Premium Broadcast complete! Sent to <b>{count}</b> users.")
@@ -1371,7 +1387,14 @@ async def process_broadcast(message: Message, state: FSMContext, bot: Bot, sessi
             await bot.copy_message(chat_id=u.id, from_chat_id=message.chat.id, message_id=message.message_id)
             count += 1
             await asyncio.sleep(0.05) # Slightly slower for media safety
-        except:
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after)
+            try:
+                await bot.copy_message(chat_id=u.id, from_chat_id=message.chat.id, message_id=message.message_id)
+                count += 1
+            except Exception:
+                pass
+        except Exception:
             pass
 
     await m.edit_text(f"✅ <b>Broadcast complete!</b>\n\nSuccessfully sent to <b>{count}</b> users.")
@@ -1502,7 +1525,14 @@ async def send_order_details(message_obj: Message, tx_id: int, session: AsyncIOM
             
     user = await get_user_by_id(session, tx.user_id)
         
-    status_text = "PENDING" if tx.status == "pending" else "COMPLETED" if tx.status == "completed" else "REJECTED"
+    status_map = {
+        "pending": ("⏳", "PENDING"),
+        "completed": ("✅", "COMPLETED"),
+        "failed": ("❌", "FAILED / REJECTED"),
+        "cancelled": ("⏰", "CANCELLED / TIMED OUT"),
+        "reversed": ("⚠️", "REVERSED")
+    }
+    status_emoji, status_text = status_map.get(tx.status, ("❓", tx.status.upper()))
     
     text = (
         header("📋", "ORDER DETAILS") +
@@ -1510,17 +1540,19 @@ async def send_order_details(message_obj: Message, tx_id: int, session: AsyncIOM
         stat_line("🆔", "User ID", f"<code>{tx.user_id}</code>") +
         stat_line("📅", "Date", tx.created_at.strftime('%d %b %Y, %H:%M:%S')) +
         divider() +
-        stat_line("🧾", "Order ID", f"<code>{tx.provider_payment_charge_id}</code>") +
+        stat_line("🧾", "Order ID", f"<code>{html.escape(str(tx.provider_payment_charge_id or tx.id))}</code>") +
         stat_line_bold("💸", "Amount", f"₹{tx.amount}") +
-        stat_line("💳", "Proof/UTR", f"<code>{tx.payment_proof_id or 'None'}</code>") +
-        stat_line("🚦", "Status", f"{status_emoji} {status_text}") +
+        stat_line("💳", "Proof/UTR", f"<code>{html.escape(str(tx.payment_proof_id or 'None'))}</code>") +
+        stat_line("🚦", "Status", f"{status_emoji} <b>{status_text}</b>") +
         divider() +
         sub_header("🎫", "COUPONS INVOLVED")
     )
     
     if items:
         for c, cat in items:
-            text += f"▪️ {cat.name}: <code>{c.code}</code>\n"
+            c_code = html.escape(c.code) if c and c.code else "N/A"
+            cat_name = html.escape(cat.name) if cat and cat.name else "Voucher"
+            text += f"▪️ {cat_name}: <code>{c_code}</code>\n"
     else:
         text += "<i>No assigned coupons</i>\n"
         
@@ -1535,24 +1567,40 @@ async def send_order_details(message_obj: Message, tx_id: int, session: AsyncIOM
     kb = InlineKeyboardMarkup(inline_keyboard=kb_list)
     
     photo_id = None
-    if tx.payment_proof_id and "File: " in tx.payment_proof_id:
-        try: photo_id = tx.payment_proof_id.split("File: ")[-1].strip()
-        except: pass
+    if tx.payment_proof_id:
+        if "File: " in tx.payment_proof_id:
+            try: photo_id = tx.payment_proof_id.split("File: ")[-1].strip()
+            except Exception: pass
+        elif "FILE:" in tx.payment_proof_id:
+            try: photo_id = tx.payment_proof_id.split("FILE:")[-1].strip()
+            except Exception: pass
 
-    try:
-        if photo_id:
-            if is_callback: await message_obj.delete()
-            if len(text) > 1024:
+    photo_sent = False
+    if photo_id:
+        try:
+            if len(text) <= 1024:
+                await message_obj.answer_photo(photo=photo_id, caption=text, reply_markup=kb)
+            else:
                 await message_obj.answer_photo(photo=photo_id)
                 await message_obj.answer(text, reply_markup=kb)
-            else:
-                await message_obj.answer_photo(photo=photo_id, caption=text, reply_markup=kb)
+            photo_sent = True
+            if is_callback:
+                try:
+                    await message_obj.delete()
+                except Exception:
+                    pass
+        except Exception:
+            # File ID is invalid, expired on Telegram CDN, or from an older bot token
+            photo_sent = False
+
+    if not photo_sent:
+        if is_callback:
+            try:
+                await message_obj.edit_text(text, reply_markup=kb)
+            except Exception:
+                await message_obj.answer(text, reply_markup=kb)
         else:
-            if is_callback: await message_obj.edit_text(text, reply_markup=kb)
-            else: await message_obj.answer(text, reply_markup=kb)
-    except Exception as e:
-        print(f"Order Detail Send Error: {e}")
-        await message_obj.answer(text, reply_markup=kb)
+            await message_obj.answer(text, reply_markup=kb)
 
 @router.callback_query(F.data.startswith("admin_approve_"))
 async def approve(callback: CallbackQuery, bot: Bot, session: AsyncIOMotorDatabase):
@@ -1650,16 +1698,16 @@ async def reject(callback: CallbackQuery, bot: Bot, session: AsyncIOMotorDatabas
     # Notify User
     await bot.send_message(
         user_id,
-        f"❌ <b>Payment Rejected</b>\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"Your payment could not be verified.\n\n"
-        f"📌 <b>Possible reasons:</b>\n"
-        f"├─ Incorrect UTR number\n"
-        f"├─ Wrong payment amount\n"
-        f"├─ Payment not received yet\n"
-        f"└─ Unclear or invalid screenshot\n\n"
-        f"🛒 You can place a new order from <b>Buy Coupons</b>.\n"
-        f"📞 For disputes: @helpdesk_coupon_bot with payment proof."
+        "❌ <b>Payment Rejected</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━\n\n"
+        "Your payment could not be verified.\n\n"
+        "📌 <b>Possible reasons:</b>\n"
+        "├─ Incorrect UTR number\n"
+        "├─ Wrong payment amount\n"
+        "├─ Payment not received yet\n"
+        "└─ Unclear or invalid screenshot\n\n"
+        "🛒 You can place a new order from <b>Buy Coupons</b>.\n"
+        "📞 For disputes: @helpdesk_coupon_bot with payment proof."
     )
     
     # Notify Admin / Update Admin Message in chat
@@ -1771,7 +1819,7 @@ async def view_codes_cb(callback: CallbackQuery):
         await callback.answer("❌ No coupons in this category.", show_alert=True)
         return
 
-    text = f"👁️ <b>Inventory (Last 30)</b>\n\n"
+    text = "👁️ <b>Inventory (Last 30)</b>\n\n"
     keyboard = []
     
     for c in coupons:
@@ -1782,11 +1830,13 @@ async def view_codes_cb(callback: CallbackQuery):
         else:
             status = "🟢 AVAIL"
         
-        text += f"{status} | <code>{c.code}</code>\n"
+        esc_code = html.escape(c.code)
+        text += f"{status} | <code>{esc_code}</code>\n"
         
         # Only show delete button for available (not sold and not currently in a pending transaction)
         if not c.is_sold and not c.transaction_id:
-            keyboard.append([InlineKeyboardButton(text=f"🗑 Delete {c.code}", callback_data=f"admin_del_coupon_ask_{c.id}")])
+            btn_label = c.code[:18] + ".." if len(c.code) > 18 else c.code
+            keyboard.append([InlineKeyboardButton(text=f"🗑 Delete {btn_label}", callback_data=f"admin_del_coupon_ask_{c.id}")])
     
     keyboard.append([InlineKeyboardButton(text="🔙 Back", callback_data=f"admin_manage_cat_{cat_id}")])
     
@@ -1841,7 +1891,7 @@ async def delete_coupon_exec(callback: CallbackQuery):
     async with AsyncSessionLocal() as session:
         coupons = await get_all_coupons_by_category(session, cat_id, limit=30)
     
-    text = f"👁️ <b>Inventory (Last 30)</b>\n\n"
+    text = "👁️ <b>Inventory (Last 30)</b>\n\n"
     keyboard = []
     
     if not coupons:
