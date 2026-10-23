@@ -2,6 +2,12 @@ import motor.motor_asyncio
 import asyncio
 import sys
 
+try:
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 async def test_connection():
     # Use direct IPs
     uri = "mongodb://huri_db:TTIChIpZt6F14rZf@159.41.192.45:27017,159.41.192.66:27017,159.41.192.86:27017/shein_bot?ssl=true&replicaSet=atlas-m0-shard-0&authSource=admin&appName=Coupon"
@@ -11,7 +17,7 @@ async def test_connection():
     try:
         client = motor.motor_asyncio.AsyncIOMotorClient(uri, serverSelectionTimeoutMS=10000, tlsAllowInvalidCertificates=True)
         await client.admin.command('ping')
-        print(f"✅ SUCCESS with IP URI!")
+        print("✅ SUCCESS with IP URI!")
     except Exception as e:
         print(f"❌ FAILED with IP URI: {e}")
 
