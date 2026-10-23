@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from aiogram import Router, F, Bot
 from aiogram.filters import CommandStart, CommandObject
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, FSInputFile, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from motor.motor_asyncio import AsyncIOMotorDatabase
@@ -26,7 +27,8 @@ from utils.fonts import (bold_sans, sans_normal, stylize_html,
     header, sub_header, divider,
     footer_box, stat_line, stat_line_bold, step_indicator, 
     progress_bar, tier_badge, time_greeting,
-    price_tag, format_coupon_code, order_id_display, countdown_text, escape_html)
+    price_tag, format_coupon_code, order_id_display, countdown_text, escape_html,
+    format_sync_time)
 
 # --- Typography Helpers ---
 def sh(text: str) -> str:
@@ -654,6 +656,33 @@ async def process_utr_invalid(message: Message):
     invalid_utr_err = sh("⚠️ <b>Invalid Input!</b> ") + sb("Please send your <b>12-digit UTR Number</b> (digits only).")
     await message.answer(invalid_utr_err)
 
+def render_inventory_view(cat_stats: list):
+    text = header("📊", "LIVE INVENTORY")
+    total_avail = 0
+    
+    for row in cat_stats:
+        cat_id, cat_name, is_active, avail, pend, price = row
+        status_icon = "🟢" if is_active and avail > 0 else "🟡" if is_active else "🚨"
+        text += f"{status_icon} <b>{cat_name.upper()}</b>"
+        if price: text += f" — {price_tag(price)}"
+        text += "\n"
+        text += stat_line("📦", "Available", str(avail))
+        text += stat_line("⏳", "Processing", str(pend))
+        text += stat_line("🛡", "Status", 'OPERATIONAL' if is_active else 'MAINTENANCE') + "\n"
+        total_avail += avail
+        
+    text += divider()
+    text += stat_line_bold("💎", "Total Vouchers", str(total_avail))
+    text += stat_line("🕒", "Last Sync", format_sync_time())
+    text += footer_box("Stock data is live. Reserved units auto-release in 10 mins.")
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=bold_sans("🔄 Refresh Stock"), callback_data="refresh_inventory")],
+        [InlineKeyboardButton(text=bold_sans("🛒 Buy Now"), callback_data="back_to_cats"),
+         InlineKeyboardButton(text=bold_sans("🏠 Back to Home"), callback_data="user_back_home")]
+    ])
+    return text, kb, total_avail
+
 @router.message(F.text == BTN_LIVE_INVENTORY)
 async def user_stocks(message: Message, state: FSMContext, session: AsyncIOMotorDatabase):
     await state.clear()
@@ -663,36 +692,13 @@ async def user_stocks(message: Message, state: FSMContext, session: AsyncIOMotor
     else:
         cat_stats = await get_inventory_summary(session)
         _INV_CACHE["data"]    = cat_stats
-        _INV_CACHE["expires"] = now + 5
+        _INV_CACHE["expires"] = now + 3
     
     if not cat_stats:
         empty_stock_msg = sh("📊 <b>Stock Status</b>\n\n") + sb("No active registries found.")
         return await message.answer(empty_stock_msg)
         
-    text = header("📊", "LIVE INVENTORY")
-    total_avail = 0
-    
-    for row in cat_stats:
-        cat_id, cat_name, is_active, avail, pend, price = row
-        status_icon = "🟢" if is_active and avail > 0 else "🟡" if is_active else "🚨"
-        text += f"{status_icon} <b>{cat_name.upper()}</b>"
-        if price: text += f" — {price_tag(price)}"
-        text += "\n"
-        text += stat_line("📦", "Available", str(avail))
-        text += stat_line("⏳", "Processing", str(pend))
-        text += stat_line("🛡", "Status", 'OPERATIONAL' if is_active else 'MAINTENANCE') + "\n"
-        total_avail += avail
-        
-    text += divider()
-    text += stat_line_bold("💎", "Total Vouchers", str(total_avail))
-    text += stat_line("🕒", "Last Sync", datetime.now().strftime('%H:%M:%S'))
-    text += footer_box("Stock data is live. Reserved units auto-release in 10 mins.")
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=bold_sans("🔄 Refresh Stock"), callback_data="refresh_inventory")],
-        [InlineKeyboardButton(text=bold_sans("🛒 Buy Now"), callback_data="back_to_cats"),
-         InlineKeyboardButton(text=bold_sans("🏠 Back to Home"), callback_data="user_back_home")]
-    ])
+    text, kb, total_avail = render_inventory_view(cat_stats)
     await message.answer(text, reply_markup=kb)
 
 @router.callback_query(F.data == "refresh_inventory")
@@ -702,41 +708,24 @@ async def refresh_inventory_cb(callback: CallbackQuery, state: FSMContext, sessi
     _INV_CACHE["expires"] = 0
     cat_stats = await get_inventory_summary(session)
     _INV_CACHE["data"]    = cat_stats
-    _INV_CACHE["expires"] = now + 5
+    _INV_CACHE["expires"] = now + 3
     
     if not cat_stats:
         empty_stock_msg = sh("📊 <b>Stock Status</b>\n\n") + sb("No active registries found.")
         return await callback.message.edit_text(empty_stock_msg)
         
-    text = header("📊", "LIVE INVENTORY")
-    total_avail = 0
+    text, kb, total_avail = render_inventory_view(cat_stats)
     
-    for row in cat_stats:
-        cat_id, cat_name, is_active, avail, pend, price = row
-        status_icon = "🟢" if is_active and avail > 0 else "🟡" if is_active else "🚨"
-        text += f"{status_icon} <b>{cat_name.upper()}</b>"
-        if price: text += f" — {price_tag(price)}"
-        text += "\n"
-        text += stat_line("📦", "Available", str(avail))
-        text += stat_line("⏳", "Processing", str(pend))
-        text += stat_line("🛡", "Status", 'OPERATIONAL' if is_active else 'MAINTENANCE') + "\n"
-        total_avail += avail
-        
-    text += divider()
-    text += stat_line_bold("💎", "Total Vouchers", str(total_avail))
-    text += stat_line("🕒", "Last Sync", datetime.now().strftime('%H:%M:%S'))
-    text += footer_box("Stock data is live. Reserved units auto-release in 10 mins.")
-    
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=bold_sans("🔄 Refresh Stock"), callback_data="refresh_inventory")],
-        [InlineKeyboardButton(text=bold_sans("🛒 Buy Now"), callback_data="back_to_cats"),
-         InlineKeyboardButton(text=bold_sans("🏠 Back to Home"), callback_data="user_back_home")]
-    ])
     try:
         await callback.message.edit_text(text, reply_markup=kb)
-    except:
-        pass
-    await callback.answer(bold_sans("Inventory Refreshed!"))
+        await callback.answer(f"⚡ Stock Updated: {total_avail} Vouchers", show_alert=False)
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e).lower():
+            await callback.answer(f"✅ Already up-to-date ({total_avail} Vouchers)", show_alert=False)
+        else:
+            await callback.answer(f"⚡ Live Stock: {total_avail} Vouchers", show_alert=False)
+    except Exception:
+        await callback.answer(f"⚡ Live Stock: {total_avail} Vouchers", show_alert=False)
 
 
 @router.callback_query(F.data == "user_back_home")
