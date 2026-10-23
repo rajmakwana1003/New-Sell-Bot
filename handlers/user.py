@@ -449,25 +449,23 @@ async def confirm_payment_step(callback: CallbackQuery, state: FSMContext, bot: 
 
     upi_id = await get_setting(session, "upi_id", "wineeex42@ptyes")
     total_val = data['total_price']
-    upi_url = f"upi://pay?pa={upi_id}&pn=VoucherShop&am={total_val}&cu=INR"
 
     pay_msg = (
         header("💳", "PAYMENT DETAILS") +
         step_indicator([("📝", "Order Created"), ("💳", "Make Payment"), ("📸", "Upload Proof")], 1) + "\n" +
         stat_line("🆔", "Order ID", order_id_display(order_id)) +
         stat_line_bold("💰", "Amount", f"₹{total_val}") +
-        stat_line("🔗", "UPI ID", f"<code>{upi_id}</code>") +
+        stat_line("🔗", "UPI ID", f"<code>{upi_id}</code> (tap to copy)") +
         countdown_text(10) + "\n" +
         divider() +
-        sb("1️⃣ Tap <b>'Pay via UPI App'</b> or scan the QR below.\n") +
-        sb("2️⃣ Pay the exact amount and save your payment screenshot.\n") +
-        sb("3️⃣ Note down the <b>12-digit UTR/Ref Number</b>.\n") +
-        sb("4️⃣ <b>RECORD SCREEN:</b> Screen recording from payment to redemption ensures warranty protection!\n\n") +
-        sb("👇 <b>Once payment is complete, tap below:</b>")
+        sb(f"1️⃣ Tap <code>{upi_id}</code> to copy the UPI ID, or scan the QR below.\n") +
+        sb(f"2️⃣ Open your UPI app (PhonePe / GPay / Paytm) & pay <b>₹{total_val}</b>.\n") +
+        sb("3️⃣ Take a screenshot of the confirmation and copy the <b>12-digit UTR</b>.\n") +
+        sb("4️⃣ <b>RECORD SCREEN:</b> Screen recording from payment to redemption ensures warranty!\n\n") +
+        sb("👇 <b>Once payment is complete, tap 'I Have Paid' below:</b>")
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Pay via UPI App", url=upi_url)],
         [InlineKeyboardButton(text=bold_sans("✅ I Have Paid"), callback_data=f"paid_{tx_id}")],
         [InlineKeyboardButton(text=bold_sans("❌ Cancel Order"), callback_data=f"cancel_order_tx_{tx_id}")]
     ])
