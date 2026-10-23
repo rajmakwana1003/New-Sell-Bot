@@ -35,27 +35,6 @@ An asynchronous, high-performance Telegram store bot built with **aiogram 3**, *
 
 ---
 
-## ⚙️ Environment Configuration (`.env`)
-
-```env
-# Telegram Bot Token from @BotFather
-BOT_TOKEN=1234567890:ABCdefGHIjklMNOpqrsTUVwxyz
-
-# Comma-separated list of Super Admin Telegram User IDs
-ADMIN_ID=123456789,987654321
-
-# MongoDB Connection String (Atlas SRV or Standard URI)
-MONGO_URL=mongodb+srv://<user>:<password>@cluster.mongodb.net/shein_bot?appName=Coupon
-
-# Optional: Port for keep-alive web server on cloud platforms
-PORT=8000
-
-# Path to default payment QR image
-PAYMENT_METHOD_IMAGE_PATH=assets/payment.jpg
-```
-
----
-
 ## 🚀 Running the Bot
 
 ### Local / VPS Execution
