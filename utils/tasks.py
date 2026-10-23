@@ -1,8 +1,11 @@
 import asyncio
-from datetime import datetime
 from aiogram import Bot
 from database.db import get_db
 from database.requests import get_expired_pending_transactions, update_transaction, get_inventory_summary
+from utils.fonts import header, footer_box, stylize_html, sans_normal
+
+def sb(text: str) -> str:
+    return stylize_html(text, sans_normal)
 
 
 async def keep_db_warm():
@@ -44,11 +47,13 @@ async def cancel_expired_orders(bot: Bot):
                 )
 
                 try:
+                    order_ref = tx.provider_payment_charge_id or f"TXN-{tx.id}"
                     expiry_msg = (
-                        "⌛ <b>QR expire ho gaya.</b>\n\n"
-                        "Agar aapne payment kar di thi toh:\n"
-                        "👉 🔄 <b>Recover Order</b> use karo — codes mil jayenge.\n\n"
-                        "Nahi ki thi toh naya order banao 👇"
+                        header("⌛", "ORDER EXPIRED") +
+                        sb(f"Your reservation for Order <code>{order_ref}</code> has expired and stock has been auto-released.\n\n") +
+                        sb("💡 <b>Already made the payment?</b>\n") +
+                        sb("Don't worry! Tap <b>'🔄 Recover Voucher'</b> in the main menu to retrieve your codes using your Order ID or UTR.\n\n") +
+                        footer_box("Tap 'Buy Coupons' anytime to start a fresh order.")
                     )
                     await bot.send_message(tx.user_id, expiry_msg)
                 except Exception:
