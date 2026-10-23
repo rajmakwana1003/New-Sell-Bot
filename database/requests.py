@@ -281,35 +281,37 @@ async def get_inventory_summary(db: AsyncIOMotorDatabase) -> list:
     """
     For Live Inventory screen.
     Returns list of (cat_id, name, is_active, avail, pend, min_price).
+    Optimized aggregation using grouping sub-pipeline to eliminate 16MB document size limits.
     """
     pipeline = [
         {"$lookup": {
             "from": "coupons",
             "let": {"cat_id": "$_id"},
-            "pipeline": [{"$match": {"$expr": {"$eq": ["$category_id", "$$cat_id"]}}}],
-            "as": "all",
+            "pipeline": [
+                {"$match": {"$expr": {"$eq": ["$category_id", "$$cat_id"]}}},
+                {"$group": {
+                    "_id": None,
+                    "avail": {"$sum": {"$cond": [
+                        {"$and": [{"$eq": ["$is_sold", False]}, {"$eq": ["$transaction_id", None]}]}, 1, 0
+                    ]}},
+                    "pend": {"$sum": {"$cond": [
+                        {"$and": [{"$eq": ["$is_sold", False]}, {"$ne": ["$transaction_id", None]}]}, 1, 0
+                    ]}},
+                    "min_price": {"$min": {"$cond": [
+                        {"$and": [{"$eq": ["$is_sold", False]}, {"$eq": ["$transaction_id", None]}]}, "$price_inr", None
+                    ]}}
+                }}
+            ],
+            "as": "stats",
         }},
-        {"$addFields": {
-            "avail": {"$size": {"$filter": {
-                "input": "$all",
-                "cond": {"$and": [{"$eq": ["$$this.is_sold", False]},
-                                  {"$eq": ["$$this.transaction_id", None]}]},
-            }}},
-            "pend": {"$size": {"$filter": {
-                "input": "$all",
-                "cond": {"$and": [{"$eq": ["$$this.is_sold", False]},
-                                  {"$ne": ["$$this.transaction_id", None]}]},
-            }}},
-            "price": {"$min": {"$map": {
-                "input": {"$filter": {
-                    "input": "$all",
-                    "cond": {"$and": [{"$eq": ["$$this.is_sold", False]},
-                                      {"$eq": ["$$this.transaction_id", None]}]},
-                }},
-                "in": "$$this.price_inr",
-            }}},
+        {"$unwind": {"path": "$stats", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "name": 1,
+            "is_active": 1,
+            "avail": {"$ifNull": ["$stats.avail", 0]},
+            "pend": {"$ifNull": ["$stats.pend", 0]},
+            "price": "$stats.min_price"
         }},
-        {"$project": {"all": 0}},
         {"$sort": {"_id": 1}},
     ]
     docs = await db.categories.aggregate(pipeline).to_list(None)
@@ -328,6 +330,37 @@ async def add_coupon(db: AsyncIOMotorDatabase, category_id: int,
            "transaction_id": None, "created_at": datetime.utcnow()}
     await db.coupons.insert_one(doc)
     return _d(doc)
+
+
+async def add_coupons_bulk(db: AsyncIOMotorDatabase, category_id: int,
+                           codes: list, price: float) -> int:
+    """
+    High-performance bulk insert of coupons in a single network round-trip.
+    Allocates an atomic sequential range of IDs and inserts via insert_many.
+    """
+    if not codes:
+        return 0
+    from database.db import get_next_ids
+    clean_codes = [c.strip() for c in codes if c and c.strip()]
+    if not clean_codes:
+        return 0
+    start_id = await get_next_ids("coupons", len(clean_codes))
+    now = datetime.utcnow()
+    docs = [
+        {
+            "_id": start_id + i,
+            "category_id": category_id,
+            "code": code,
+            "price_inr": price,
+            "is_sold": False,
+            "sold_to": None,
+            "transaction_id": None,
+            "created_at": now
+        }
+        for i, code in enumerate(clean_codes)
+    ]
+    await db.coupons.insert_many(docs, ordered=False)
+    return len(docs)
 
 
 async def get_coupon(db: AsyncIOMotorDatabase, coupon_id: int) -> Optional[Doc]:
@@ -431,7 +464,73 @@ async def get_transaction(db: AsyncIOMotorDatabase, tx_id: int) -> Optional[Doc]
 
 
 async def update_transaction(db: AsyncIOMotorDatabase, tx_id: int, **kwargs):
-    await db.transactions.update_one({"_id": tx_id}, {"$set": kwargs})
+    """
+    Update transaction fields safely.
+    If 'utr' is passed as None or empty, it unsets the field so MongoDB's
+    unique sparse index does not raise duplicate key errors.
+    """
+    unset_fields = {}
+    set_fields = {}
+    for k, v in kwargs.items():
+        if k == "utr" and (v is None or v == ""):
+            unset_fields["utr"] = ""
+        else:
+            set_fields[k] = v
+            
+    update_doc = {}
+    if set_fields:
+        update_doc["$set"] = set_fields
+    if unset_fields:
+        update_doc["$unset"] = unset_fields
+        
+    if update_doc:
+        await db.transactions.update_one({"_id": tx_id}, update_doc)
+
+
+async def check_duplicate_utr(db: AsyncIOMotorDatabase, utr: str, exclude_tx_id: int = None) -> Optional[Doc]:
+    """
+    Check if a 12-digit UTR has already been used for an active (pending or completed) order.
+    Excludes the specified transaction if updating.
+    """
+    clean_utr = str(utr).strip()
+    if not clean_utr:
+        return None
+        
+    query = {
+        "utr": clean_utr,
+        "status": {"$in": ["completed", "pending"]}
+    }
+    if exclude_tx_id is not None:
+        query["_id"] = {"$ne": int(exclude_tx_id)}
+        
+    doc = await db.transactions.find_one(query)
+    return _d(doc)
+
+
+async def find_user_transaction(db: AsyncIOMotorDatabase, user_id: int, search_term: str) -> Optional[Doc]:
+    """
+    Strictly search for an order belonging to a specific user.
+    Prevents false security warnings or leaking other users' order information.
+    """
+    term = str(search_term).strip()
+    if not term:
+        return None
+        
+    # Check numeric ID (only reasonable short IDs)
+    if term.isdigit() and len(term) <= 9:
+        doc = await db.transactions.find_one({"_id": int(term), "user_id": user_id})
+        if doc:
+            return _d(doc)
+            
+    # Check exact Order ID or UTR
+    doc = await db.transactions.find_one({
+        "user_id": user_id,
+        "$or": [
+            {"provider_payment_charge_id": {"$regex": f"^{re.escape(term)}$", "$options": "i"}},
+            {"utr": term}
+        ]
+    })
+    return _d(doc)
 
 
 async def finalize_sale(db: AsyncIOMotorDatabase, tx_id: int, user_id: int):
@@ -457,32 +556,46 @@ async def reverse_sale(db: AsyncIOMotorDatabase, tx_id: int):
 
 
 async def find_transaction_robust(db: AsyncIOMotorDatabase, search_term: str) -> Optional[Doc]:
-    """Search by integer ID, order ID string, UTR, or payment proof."""
-    try:
-        doc = await db.transactions.find_one({"_id": int(search_term)})
-        if doc:
-            return _d(doc)
-    except (ValueError, TypeError):
-        pass
+    """
+    Search by integer ID, exact order ID string, UTR, or payment proof.
+    Used by admin lookup panel.
+    """
+    term = str(search_term).strip()
+    if not term:
+        return None
 
+    # Check integer ID if reasonable length
+    if term.isdigit() and len(term) <= 9:
+        try:
+            doc = await db.transactions.find_one({"_id": int(term)})
+            if doc:
+                return _d(doc)
+        except Exception:
+            pass
+
+    # Exact match on Order ID, UTR, or proof ID
     doc = await db.transactions.find_one({"$or": [
-        {"provider_payment_charge_id": search_term},
-        {"utr": search_term},
-        {"payment_proof_id": search_term},
+        {"provider_payment_charge_id": {"$regex": f"^{re.escape(term)}$", "$options": "i"}},
+        {"utr": term},
+        {"payment_proof_id": term},
     ]})
     if doc is not None:
         return _d(doc)
 
-    try:
-        pattern = re.compile(re.escape(search_term), re.IGNORECASE)
-        doc = await db.transactions.find_one(
-            {"provider_payment_charge_id": {"$regex": pattern}},
-            sort=[("created_at", DESCENDING)],
-        )
-        if doc:
-            return _d(doc)
-    except Exception:
-        pass
+    # Prefix/contains regex search only if term is substantial (>= 6 characters)
+    # to avoid false matching on generic prefixes like 'SHN-'
+    if len(term) >= 6:
+        try:
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+            doc = await db.transactions.find_one(
+                {"provider_payment_charge_id": {"$regex": pattern}},
+                sort=[("created_at", DESCENDING)],
+            )
+            if doc:
+                return _d(doc)
+        except Exception:
+            pass
+            
     return None
 
 
