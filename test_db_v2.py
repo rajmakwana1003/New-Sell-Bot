@@ -2,6 +2,12 @@ import motor.motor_asyncio
 import asyncio
 import sys
 
+try:
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 async def test_connection():
     # Use the non-SRV connection string (Standard Connection String)
     # Reconstructed from SRV lookups and Atlas patterns
@@ -12,7 +18,7 @@ async def test_connection():
     try:
         client = motor.motor_asyncio.AsyncIOMotorClient(uri, serverSelectionTimeoutMS=10000, tlsAllowInvalidCertificates=True)
         await client.admin.command('ping')
-        print(f"✅ SUCCESS with Standard URI!")
+        print("✅ SUCCESS with Standard URI!")
     except Exception as e:
         print(f"❌ FAILED with Standard URI: {e}")
 
