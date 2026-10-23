@@ -16,7 +16,7 @@ USER_CACHE: dict = {}
 MAINTENANCE_TTL = 600
 CHANNELS_TTL    = 7200
 USER_TTL        = 900
-JOIN_TTL        = 10
+JOIN_TTL        = 3600  # 1 hour cache (prevents Telegram API 429 rate-limiting and reduces latency)
 
 SUPER_ADMINS = [int(x.strip()) for x in os.getenv("ADMIN_ID", "0").split(",") if x.strip()]
 
