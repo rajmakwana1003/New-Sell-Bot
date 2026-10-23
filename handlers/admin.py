@@ -12,7 +12,7 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 from database.db import AsyncSessionLocal
 from utils.fonts import (bold_sans, sans_normal, stylize_html,
     header, sub_header, divider,
-    footer_box, stat_line, stat_line_bold)
+    footer_box, stat_line, stat_line_bold, get_ist_now)
 
 def sh(text: str) -> str:
     return stylize_html(text, bold_sans)
@@ -1364,7 +1364,7 @@ async def admin_stats_msg(message: Message, state: FSMContext, session: AsyncIOM
         )
     
     text += "━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"🕒 <i>Report generated on {datetime.now().strftime('%d %b, %H:%M')}</i>"
+    text += f"🕒 <i>Report generated on {get_ist_now().strftime('%d %b, %I:%M %p IST')}</i>"
     
     await message.answer(text)
 
