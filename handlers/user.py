@@ -1,7 +1,5 @@
 import os
 import time
-import random
-import string
 import secrets
 import re
 import asyncio
@@ -12,11 +10,10 @@ from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKe
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from motor.motor_asyncio import AsyncIOMotorDatabase
-from database.db import AsyncSessionLocal
 from database.requests import (
-    get_or_create_user, get_categories, get_available_coupons,
-    get_coupon, create_transaction, get_setting, get_user_by_id, 
-    finalize_sale, update_transaction, get_coupons_by_transaction, 
+    get_or_create_user, get_available_coupons,
+    create_transaction, get_setting, get_user_by_id, 
+    update_transaction, 
     get_available_reward, use_reward, get_channels, increment_user_warning, 
     get_transaction, find_transaction_robust, get_support_contacts,
     get_category, get_category_stock_summary, get_inventory_summary,
@@ -26,10 +23,10 @@ from database.requests import (
     get_user_order_counts
 )
 from utils.fonts import (bold_sans, sans_normal, stylize_html, 
-    header, sub_header, divider, light_divider, mini_divider,
+    header, sub_header, divider,
     footer_box, stat_line, stat_line_bold, step_indicator, 
-    progress_bar, stock_bar, tier_badge, tier_icon, time_greeting,
-    price_tag, code_block, format_coupon_code, order_id_display, countdown_text, escape_html)
+    progress_bar, tier_badge, time_greeting,
+    price_tag, format_coupon_code, order_id_display, countdown_text, escape_html)
 
 # --- Typography Helpers ---
 def sh(text: str) -> str:
@@ -265,7 +262,7 @@ async def check_join_callback(callback: CallbackQuery, state: FSMContext, bot: B
     uc["is_admin"] = is_admin
     uc["is_blocked"] = False
     uc["is_joined"] = True
-    uc["join_expires"] = time.time() + 10
+    uc["join_expires"] = time.time() + 3600
     uc["user_expires"] = time.time() + 900
 
     # Clean state
@@ -451,21 +448,26 @@ async def confirm_payment_step(callback: CallbackQuery, state: FSMContext, bot: 
         return await callback.message.answer(busy_msg)
 
     upi_id = await get_setting(session, "upi_id", "wineeex42@ptyes")
+    total_val = data['total_price']
+    upi_url = f"upi://pay?pa={upi_id}&pn=VoucherShop&am={total_val}&cu=INR"
+
     pay_msg = (
         header("💳", "PAYMENT DETAILS") +
         step_indicator([("📝", "Order Created"), ("💳", "Make Payment"), ("📸", "Upload Proof")], 1) + "\n" +
         stat_line("🆔", "Order ID", order_id_display(order_id)) +
-        stat_line_bold("💰", "Amount", f"₹{data['total_price']}") +
-        stat_line("🔗", "UPI", f"<code>{upi_id}</code>") +
+        stat_line_bold("💰", "Amount", f"₹{total_val}") +
+        stat_line("🔗", "UPI ID", f"<code>{upi_id}</code>") +
         countdown_text(10) + "\n" +
         divider() +
-        sb("1️⃣ Pay the <u>EXACT</u> amount to the UPI ID.\n") +
-        sb("2️⃣ Save the screenshot and note the <b>12-digit UTR/Ref Number</b>.\n") +
-        sb("3️⃣ <b>RECORD YOUR SCREEN:</b> No replacement without full uncut video proof!\n\n") +
-        sb("👇 <b>Once paid, click the button below:</b>")
+        sb("1️⃣ Tap <b>'Pay via UPI App'</b> or scan the QR below.\n") +
+        sb("2️⃣ Pay the exact amount and save your payment screenshot.\n") +
+        sb("3️⃣ Note down the <b>12-digit UTR/Ref Number</b>.\n") +
+        sb("4️⃣ <b>RECORD SCREEN:</b> Screen recording from payment to redemption ensures warranty protection!\n\n") +
+        sb("👇 <b>Once payment is complete, tap below:</b>")
     )
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Pay via UPI App", url=upi_url)],
         [InlineKeyboardButton(text=bold_sans("✅ I Have Paid"), callback_data=f"paid_{tx_id}")],
         [InlineKeyboardButton(text=bold_sans("❌ Cancel Order"), callback_data=f"cancel_order_tx_{tx_id}")]
     ])
@@ -491,7 +493,7 @@ async def confirm_payment_step(callback: CallbackQuery, state: FSMContext, bot: 
         await state.update_data(tx_id=tx_id, order_id=order_id, _processing=False)
         await state.set_state(UserStates.waiting_for_payment_screenshot)
         await callback.message.delete()
-    except Exception as e:
+    except Exception:
         await state.update_data(_processing=False)
         await bot.send_message(chat_id=user_id, text=pay_msg, reply_markup=kb)
 
@@ -553,8 +555,10 @@ async def process_utr_final(message: Message, state: FSMContext, bot: Bot, sessi
     
     utr = utr_match.group(0)
 
-    # Check for Duplicate UTR
-    existing_utr = await find_transaction_robust(session, utr)
+    # Check for Duplicate UTR using dedicated strict check
+    from database.requests import check_duplicate_utr
+    data = await state.get_data(); tx_id = data.get('tx_id')
+    existing_utr = await check_duplicate_utr(session, utr, exclude_tx_id=int(tx_id) if tx_id else None)
     if existing_utr:
         count = await increment_user_warning(session, user_id)
         if count >= 5:
@@ -566,7 +570,7 @@ async def process_utr_final(message: Message, state: FSMContext, bot: Bot, sessi
         dup_utr_msg = (
             sh("⚠️ <b>DUPLICATE UTR DETECTED</b>\n\n") +
             sb(
-                f"This UTR (<code>{utr}</code>) has already been used for another order. Attempt logged ({count}/5 strikes).\n\n"
+                f"This UTR (<code>{utr}</code>) has already been used for another completed or pending order. Attempt logged ({count}/5 strikes).\n\n"
                 f"<i>Do not reuse UTRs from old payments. Repeat offenses lead to a permanent ban!</i>"
             )
         )
@@ -583,7 +587,7 @@ async def process_utr_final(message: Message, state: FSMContext, bot: Bot, sessi
         abuse_ban_msg = sh("🚫 <b>PERMANENT BAN</b>\n\n") + sb("Reason: Suspicious payment attempts detected. Contact support for appeal.")
         return await message.answer(abuse_ban_msg)
 
-    data = await state.get_data(); order_id = data.get('order_id'); tx_id = data.get('tx_id'); photo_id = data.get('photo_id')
+    order_id = data.get('order_id'); photo_id = data.get('photo_id')
     
     if tx_id:
         tx = await get_transaction(session, int(tx_id))
@@ -599,13 +603,20 @@ async def process_utr_final(message: Message, state: FSMContext, bot: Bot, sessi
             session_err_msg = sh("❌ <b>Session error.</b> ") + sb("Please re-upload your screenshot first.")
             return await message.answer(session_err_msg)
 
-        await update_transaction(session, int(tx_id), utr=utr, payment_proof_id=f"UTR: {utr} | File: {photo_id}")
+        try:
+            await update_transaction(session, int(tx_id), utr=utr, payment_proof_id=f"UTR: {utr} | File: {photo_id}")
+        except Exception as e:
+            if "duplicate" in str(e).lower():
+                dup_err = sh("⚠️ <b>DUPLICATE UTR</b>\n\n") + sb("This reference number was already registered in the system.")
+                return await message.answer(dup_err)
+            raise
     else: 
         session_fail_msg = sh("❌ ") + sb("Session Error. Please try again.")
         return await message.answer(session_fail_msg)
 
+    # Broadcast pending order notification to all configured admins
     admin_id_raw = os.getenv("ADMIN_ID", "")
-    primary_admin = admin_id_raw.split(",")[0].strip() if admin_id_raw else None
+    admin_list = [int(x.strip()) for x in admin_id_raw.split(",") if x.strip()]
     
     await state.clear()
     
@@ -620,23 +631,24 @@ async def process_utr_final(message: Message, state: FSMContext, bot: Bot, sessi
     )
     await message.answer(submitted_msg)
     
-    if primary_admin:
+    if admin_list:
         kb = [[InlineKeyboardButton(text=bold_sans("✅ Approve"), callback_data=f"admin_approve_{tx_id}"), 
                InlineKeyboardButton(text=bold_sans("❌ Reject"), callback_data=f"admin_reject_{tx_id}")]]
-        try:
-            admin_msg = (
-                header("🔔", "NEW PENDING ORDER") +
-                stat_line("👤", "Client", escape_html(message.from_user.full_name)) +
-                stat_line("🆔", "User ID", f"<code>{user_id}</code>") +
-                stat_line("📦", "Item", f"{data.get('quantity', tx.quantity)} × {data.get('cat_name', '(Voucher)')}") +
-                stat_line_bold("💸", "Paid", f"₹{data.get('total_price', tx.amount)}") +
-                divider() +
-                stat_line("📋", "Order ID", f"<code>{order_id}</code>") +
-                stat_line("🔑", "UTR", f"<code>{utr}</code>")
-            )
-            await bot.send_photo(chat_id=primary_admin, photo=photo_id, caption=admin_msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
-        except Exception as e:
-            print(f"Admin Notification Error: {e}")
+        admin_msg = (
+            header("🔔", "NEW PENDING ORDER") +
+            stat_line("👤", "Client", escape_html(message.from_user.full_name)) +
+            stat_line("🆔", "User ID", f"<code>{user_id}</code>") +
+            stat_line("📦", "Item", f"{data.get('quantity', tx.quantity)} × {data.get('cat_name', '(Voucher)')}") +
+            stat_line_bold("💸", "Paid", f"₹{data.get('total_price', tx.amount)}") +
+            divider() +
+            stat_line("📋", "Order ID", f"<code>{order_id}</code>") +
+            stat_line("🔑", "UTR", f"<code>{utr}</code>")
+        )
+        for adm_id in admin_list:
+            try:
+                await bot.send_photo(chat_id=adm_id, photo=photo_id, caption=admin_msg, reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+            except Exception as e:
+                print(f"Admin Notification Error for {adm_id}: {e}")
 
 @router.message(UserStates.waiting_for_utr)
 async def process_utr_invalid(message: Message):
@@ -817,9 +829,6 @@ async def show_referral_menu(message: Message, session: AsyncIOMotorDatabase, us
         return await message.answer(offline_msg)
     
     progress = user.referral_count if user else 0
-    bar_size = 10
-    filled = min(int((progress / goal) * bar_size), bar_size) if goal > 0 else 0
-    bar = "🟩" * filled + "⬜" * (bar_size - filled)
     
     kb = [
         [InlineKeyboardButton(text=bold_sans(f"🎁 Claim Reward {'✅' if progress >= goal else ''}"), callback_data="redeem_referral")],
@@ -829,7 +838,7 @@ async def show_referral_menu(message: Message, session: AsyncIOMotorDatabase, us
     
     text = (
         header("👥", "REFER & EARN") +
-        sb(f"Invite your friends and earn premium vouchers for <b>FREE</b>! 🎁\n\n") +
+        sb("Invite your friends and earn premium vouchers for <b>FREE</b>! 🎁\n\n") +
         stat_line("🎯", "Goal", f"{goal} Referrals = 1 Voucher") +
         stat_line("📦", "Pool", f"{pool or 0} rewards remaining") +
         divider() +
@@ -1047,7 +1056,7 @@ async def user_recover_tx_cb(callback: CallbackQuery, state: FSMContext, session
         failed_msg = (
             header("❌", "ORDER FAILED/EXPIRED") +
             stat_line("📋", "ID", f"<code>{order_id}</code>") +
-            stat_line("🚦", "Status", f"🔴 Rejected or Expired") +
+            stat_line("🚦", "Status", "🔴 Rejected or Expired") +
             divider() +
             sb("This order was rejected by administrator or expired automatically. Please place a new order.")
         )
@@ -1065,20 +1074,33 @@ async def recover_order_process(message: Message, state: FSMContext, bot: Bot, s
     if utr_match: search_term = utr_match.group(0)
     else: search_term = text
 
-    tx = await find_transaction_robust(session, search_term)
-    if tx and tx.user_id != message.from_user.id:
-        count = await increment_user_warning(session, message.from_user.id); await state.clear()
-        if count >= 5: 
-            from middlewares.checks import USER_CACHE
-            USER_CACHE.pop(message.from_user.id, None)
-            banned_err = sh("🚫 <b>BANNED</b>\n\n") + sb("Fraudulent intent detected.")
-            await message.answer(banned_err)
-            return
-        violation_err = sh("🚨 <b>SECURITY VIOLATION</b>\n\n") + sb(f"That ID does not belong to you. Attempt logged. ({count}/5 strikes)")
-        return await message.answer(violation_err)
+    from database.requests import find_user_transaction
+    tx = await find_user_transaction(session, message.from_user.id, search_term)
     
-    if not tx: 
-        not_found_err = sh("❌ <b>ORDER NOT FOUND</b>\n\n") + sb("Check your ID and re-send. Make sure you are using the correct Order ID (SHN-...) or UTR.")
+    # If not found under current user, check if an exact full ID/UTR belongs to someone else
+    if not tx:
+        is_full_order_id = bool(re.match(r'^SHN-[A-F0-9]{8}$', search_term, re.IGNORECASE))
+        is_full_utr = bool(re.match(r'^\d{12}$', search_term))
+        
+        if is_full_order_id or is_full_utr:
+            other_tx = await find_transaction_robust(session, search_term)
+            if other_tx and other_tx.user_id != message.from_user.id:
+                count = await increment_user_warning(session, message.from_user.id)
+                await state.clear()
+                if count >= 5: 
+                    from middlewares.checks import USER_CACHE
+                    USER_CACHE.pop(message.from_user.id, None)
+                    banned_err = sh("🚫 <b>BANNED</b>\n\n") + sb("Fraudulent intent detected.")
+                    await message.answer(banned_err)
+                    return
+                violation_err = sh("🚨 <b>SECURITY VIOLATION</b>\n\n") + sb(f"That order does not belong to your account. Attempt logged. ({count}/5 strikes)")
+                return await message.answer(violation_err)
+
+        not_found_err = (
+            sh("❌ <b>ORDER NOT FOUND</b>\n\n") +
+            sb("We couldn't find an order with that reference under your account.\n\n"
+               "👉 Please make sure you entered your complete <b>Order ID</b> (e.g. <code>SHN-XXXXXXX</code>) or <b>12-digit UTR</b>.")
+        )
         return await message.answer(not_found_err)
     
     tx, items = await get_transaction_with_items(session, tx.id)
@@ -1207,9 +1229,10 @@ async def user_profile(message: Message, state: FSMContext, session: AsyncIOMoto
     status_text = "Blacklisted" if user.is_blocked else "Flagged" if user.is_suspicious else "Active Member"
     
     bot_me = await message.bot.get_me()
+    esc_first_name = escape_html(message.from_user.first_name or "Friend")
     text = (
         header("👤", "USER DASHBOARD") +
-        sb(f"👋 <b>Welcome back, {message.from_user.first_name}!</b> ") + tier_badge(bought) + "\n\n" +
+        sb(f"👋 <b>Welcome back, {esc_first_name}!</b> ") + tier_badge(bought) + "\n\n" +
         stat_line("🆔", "Account ID", f"<code>{user.id}</code>") +
         stat_line("📅", "Member Since", user.created_at.strftime('%d %b %Y')) +
         stat_line("🛡️", "Account Status", f"{status_icon} {status_text}") +
