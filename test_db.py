@@ -3,6 +3,12 @@ import asyncio
 import sys
 import certifi
 
+try:
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 async def test_connection():
     uri = "mongodb+srv://huri_db:TTIChIpZt6F14rZf@coupon.8mp1wfm.mongodb.net/shein_bot?appName=Coupon"
     print(f"Testing URI: {uri}")
